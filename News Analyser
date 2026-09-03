@@ -1,0 +1,166 @@
+"""
+Financial News Sentiment vs Stock Price Analyzer
+--------------------------------------------------
+Compares news sentiment for a company against its share price movement.
+
+Companies analysed: Goldman Sachs (GS) and Deutsche Bank (DB)
+
+How it works:
+1. Pulls recent news headlines for each company from Google News RSS (free, no API key needed)
+2. Scores each headline's sentiment using VADER (offline, no API key needed)
+3. Pulls recent share price history using yfinance (free, no API key needed)
+4. Plots sentiment score against share price over time
+
+Run with: python3 sentiment_stock_analyzer.py
+"""
+
+import urllib.request
+import urllib.parse
+import xml.etree.ElementTree as ET
+from datetime import datetime, timedelta
+from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+import yfinance as yf
+import pandas as pd
+import matplotlib.pyplot as plt
+
+# ----------------------------
+# CONFIG
+# ----------------------------
+COMPANIES = {
+    "Goldman Sachs": "GS",
+    "Deutsche Bank": "DB",
+}
+DAYS_BACK = 14  # how many days of news/price history to pull
+
+
+# ----------------------------
+# STEP 1: Fetch news headlines
+# ----------------------------
+def get_news_headlines(company_name, max_results=20):
+    """
+    Pulls recent headlines for a company from Google News RSS.
+    Returns a list of (headline_text, published_date) tuples.
+    """
+    query = urllib.parse.quote(company_name)
+    url = f"https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en"
+
+    headlines = []
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=10) as response:
+            xml_data = response.read()
+
+        root = ET.fromstring(xml_data)
+        items = root.findall(".//item")[:max_results]
+
+        for item in items:
+            title = item.find("title").text
+            pub_date_raw = item.find("pubDate").text
+            # RSS date format: 'Thu, 03 Sep 2026 10:00:00 GMT'
+            pub_date = datetime.strptime(pub_date_raw, "%a, %d %b %Y %H:%M:%S %Z")
+            headlines.append((title, pub_date))
+
+    except Exception as e:
+        print(f"  [!] Could not fetch news for {company_name}: {e}")
+
+    return headlines
+
+
+# ----------------------------
+# STEP 2: Score sentiment
+# ----------------------------
+def score_headlines(headlines):
+    """
+    Takes a list of (headline, date) tuples.
+    Returns a list of (date, sentiment_score) tuples.
+    """
+    analyzer = SentimentIntensityAnalyzer()
+    scored = []
+    for text, date in headlines:
+        compound_score = analyzer.polarity_scores(text)["compound"]
+        scored.append((date.date(), compound_score))
+    return scored
+
+
+# ----------------------------
+# STEP 3: Fetch stock prices
+# ----------------------------
+def get_stock_prices(ticker, days_back):
+    """
+    Pulls daily closing prices for the given ticker over the last N days.
+    Returns a pandas Series indexed by date.
+    """
+    end = datetime.today()
+    start = end - timedelta(days=days_back)
+    data = yf.download(ticker, start=start, end=end, progress=False)
+    return data["Close"]
+
+
+# ----------------------------
+# STEP 4: Combine and plot
+# ----------------------------
+def build_daily_sentiment(scored_headlines):
+    """
+    Averages sentiment scores by day (since multiple headlines can land on the same day).
+    Returns a pandas Series indexed by date.
+    """
+    df = pd.DataFrame(scored_headlines, columns=["date", "score"])
+    daily_avg = df.groupby("date")["score"].mean()
+    return daily_avg
+
+
+def plot_company(company_name, ticker, sentiment_series, price_series):
+    fig, ax1 = plt.subplots(figsize=(10, 5))
+
+    ax1.set_xlabel("Date")
+    ax1.set_ylabel("Avg. Sentiment Score", color="tab:blue")
+    ax1.plot(sentiment_series.index, sentiment_series.values,
+              color="tab:blue", marker="o", label="News Sentiment")
+    ax1.axhline(0, color="grey", linestyle="--", linewidth=0.8)
+    ax1.tick_params(axis="y", labelcolor="tab:blue")
+
+    ax2 = ax1.twinx()
+    ax2.set_ylabel(f"{ticker} Share Price ($)", color="tab:red")
+    ax2.plot(price_series.index, price_series.values,
+              color="tab:red", marker="x", label="Share Price")
+    ax2.tick_params(axis="y", labelcolor="tab:red")
+
+    plt.title(f"{company_name} ({ticker}): News Sentiment vs Share Price")
+    fig.tight_layout()
+    plt.xticks(rotation=45)
+    filename = f"{ticker}_sentiment_vs_price.png"
+    plt.savefig(filename, dpi=150, bbox_inches="tight")
+    print(f"  Saved chart: {filename}")
+    plt.close()
+
+
+# ----------------------------
+# MAIN
+# ----------------------------
+def main():
+    for company_name, ticker in COMPANIES.items():
+        print(f"\nAnalysing {company_name} ({ticker})...")
+
+        headlines = get_news_headlines(company_name)
+        print(f"  Found {len(headlines)} headlines")
+        if not headlines:
+            continue
+
+        scored = score_headlines(headlines)
+        daily_sentiment = build_daily_sentiment(scored)
+
+        prices = get_stock_prices(ticker, DAYS_BACK)
+        if prices.empty:
+            print(f"  [!] No price data found for {ticker}")
+            continue
+
+        plot_company(company_name, ticker, daily_sentiment, prices)
+
+        avg_sentiment = daily_sentiment.mean()
+        price_change_pct = ((prices.iloc[-1] - prices.iloc[0]) / prices.iloc[0]) * 100
+        print(f"  Avg sentiment: {avg_sentiment:.3f} | "
+              f"Price change over period: {price_change_pct:.2f}%")
+
+
+if __name__ == "__main__":
+    main()
